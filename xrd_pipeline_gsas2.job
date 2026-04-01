@@ -37,7 +37,12 @@ echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
 echo "===== END JOB METADATA ========="
 echo ""
 echo "===== START COMPUTATION ========"
-srun --unbuffered mkdir -p runs/gsas2 && cd runs/gsas2 && python ../../rruff_xrd_analysis.py --run-refinement --refinement-engine gsas2 --output-csv gsas2_results.csv --output-poscars gsas2_poscars.json
+
+if [[ ! -f key.txt ]]; then
+    echo "ERROR: key.txt not found in current repo"
+    exit 1
+fi
+API_KEY="$(tr -d '\r\n' < key.txt)"
+
+srun --unbuffered mkdir -p runs/gsas2 && cd runs/gsas2 && python ../../rruff_xrd_analysis.py --api-key "$API_KEY" --run-refinement --refinement-engine gsas2 --output-csv gsas2_results.csv --output-poscars gsas2_poscars.json
 echo "===== JOB FINISHED ============="
-
-
