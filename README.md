@@ -1,5 +1,7 @@
 # AGAPI XRD Paper — Scripts Overview
 
+Create a key.txt file in the repository root containing your AtomGPT.org API key, as the workflow reads this file at runtime to authenticate all API requests.
+
 **plot_refinement_mae.py**  
     Generates a single MAE chart across all six lattice parameters,  
     comparing the three refinement methods.
