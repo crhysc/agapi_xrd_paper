@@ -1,15 +1,20 @@
+# AGAPI XRD Paper — Scripts Overview
 
+plot_refinement_mae.py
+    Generates a single MAE chart across all six lattice parameters,
+    comparing the three refinement methods.
 
+plot_refinement_jsd_18panel.py
+    Produces a 6×3 panel figure of Jensen–Shannon divergence (JSD)
+    for the three refinement methods across the six lattice parameters.
 
+plot_match_rate_crystal_systems.py
+    Outputs six figures:
+        (1–3) Individual normalized crystal system histograms (one per method)
+        (4)   Combined histogram (all three methods)
+        (5)   Match rate pie chart
+        (6)   Combined histogram + match rate pie chart
 
-
-plot_refinement_mae.py              creates a single MAE charts for 6 lattice parameters and 3 refinement methods
-plot_refinement_jsd_18panel.py      creates a plot with 6x3 panels of JSD calculations with the 3 refinement methods for 6 lat params
-plot_match_rate_crystal_systems.py  creates 6 figures, 3 are crystal system histograms, 1 is all 3 hists, 1 is MR pie chart, 1 is 3 hists and 1 pie chart
-stoich.sh                           creates a normalized pie chart histogram showing the most common atomic species in RRUFF database
-
-
-
-
-
-
+stoich.sh
+    Generates a normalized pie chart showing the most common atomic
+    species in the RRUFF database.
