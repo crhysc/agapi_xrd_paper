@@ -37,7 +37,12 @@ echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
 echo "===== END JOB METADATA ========="
 echo ""
 echo "===== START COMPUTATION ========"
-srun --unbuffered mkdir -p runs/bmgn && cd runs/bmgn && python ../../rruff_xrd_analysis.py --run-refinement --refinement-engine bmgn --output-csv bmgn_results.csv --output-poscars bmgn_poscars.json
+
+if [[ ! -f key.txt ]]; then
+    echo "ERROR: key.txt not found in current repo"
+    exit 1
+fi
+API_KEY="$(tr -d '\r\n' < key.txt)"
+
+srun --unbuffered mkdir -p runs/bmgn && cd runs/bmgn && python ../../rruff_xrd_analysis.py --api-key "$API_KEY" --run-refinement --refinement-engine bmgn --output-csv bmgn_results.csv --output-poscars bmgn_poscars.json
 echo "===== JOB FINISHED ============="
-
-
