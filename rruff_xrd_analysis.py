@@ -13,7 +13,7 @@ Jupyter:
   df, consolidated = run_pipeline(cfg)
 """
 
-import argparse, json, re, time, sys
+import argparse, json, re, time, sys, os
 import numpy as np
 import pandas as pd
 import requests
@@ -31,6 +31,8 @@ DEFAULTS = dict(
     max_retries=5, initial_backoff=5.0, backoff_multiplier=2.0,
     max_backoff=120.0, output_csv="rruff_xrd_results_cod_max10.csv",
     output_poscars="rruff_matched_poscars_cod_max10.json",
+    cache_dir=".rruff_cache", resume=True, overwrite_cache=False,
+    write_every=1,
 )
 
 _VALID_ELEMENTS = {
@@ -258,6 +260,159 @@ def print_structure(info, label=""):
             print(f"{prefix}   Density:  {atoms.density:.4f} g/cm³")
 
 
+def _entry_uid(entry):
+    rid = str(entry.get("##RRUFFID", "unknown"))
+    name = re.sub(r"[^A-Za-z0-9_-]", "_", str(entry.get("##NAMES", "unknown")))
+    return f"{rid}__{name}"
+
+
+def _row_cacheable(row):
+    out = {}
+    for k, v in row.items():
+        if k == "atoms":
+            out[k] = None
+        elif k in ("pm_atoms_dict", "dg_atoms_dict", "best_atoms_dict") and v is not None and hasattr(v, "to_dict"):
+            out[k] = v.to_dict()
+        else:
+            out[k] = v
+    return out
+
+
+def _entry_payload_from_row(r):
+    return {
+        "mineral_name":r.get("mineral_name"),"rruff_id":r.get("rruff_id"),"formula":r.get("formula"),
+        "elements":r.get("elements"),"query_used":r.get("query_used"),"num_points":r.get("num_points"),
+        "rruff_cell":{"a":r.get("rruff_a"),"b":r.get("rruff_b"),"c":r.get("rruff_c"),
+            "alpha":r.get("rruff_alpha"),"beta":r.get("rruff_beta"),"gamma":r.get("rruff_gamma"),
+            "volume":r.get("rruff_volume"),"crystal_system":r.get("rruff_crystal_system")},
+        "pattern_matching":{"success":bool(r.get("pm_success")),"jid":r.get("pm_jid"),
+            "similarity":r.get("pm_similarity"),"formula":r.get("pm_formula"),
+            "spacegroup":r.get("pm_spacegroup"),"num_atoms":r.get("pm_num_atoms"),
+            "poscar":r.get("pm_poscar"),"atoms_dict":r.get("pm_atoms_dict")},
+        "diffractgpt":{"success":bool(r.get("dg_success")),"similarity":r.get("dg_similarity"),
+            "formula":r.get("dg_formula"),"spacegroup":r.get("dg_spacegroup"),
+            "num_atoms":r.get("dg_num_atoms"),"poscar":r.get("dg_poscar"),"atoms_dict":r.get("dg_atoms_dict")},
+        "best_match":{"method":r.get("best_method"),"similarity":r.get("best_similarity"),
+            "poscar":r.get("best_poscar"),"atoms_dict":r.get("best_atoms_dict")},
+        "predicted_cell":{"a":r.get("pred_a"),"b":r.get("pred_b"),"c":r.get("pred_c"),
+            "alpha":r.get("pred_alpha"),"beta":r.get("pred_beta"),"gamma":r.get("pred_gamma"),
+            "volume":r.get("pred_volume"),"cell_type":r.get("cell_type")},
+        "refinement":{"rwp":r.get("refinement_rwp"),"engine":r.get("refinement_engine")},
+        "time_s":r.get("time_s"),"error":r.get("error"),
+    }
+
+
+def _atomic_write_json(path, obj):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(obj, f, indent=2, default=_json_default)
+    os.replace(tmp, path)
+
+
+def _atomic_write_csv(path, df):
+    tmp = path + ".tmp"
+    df.to_csv(tmp, index=False)
+    os.replace(tmp, path)
+
+
+def _load_cached_results(cache_dir):
+    cache = {}
+    if not os.path.isdir(cache_dir):
+        return cache
+    for fn in sorted(os.listdir(cache_dir)):
+        if not fn.endswith(".json"):
+            continue
+        fp = os.path.join(cache_dir, fn)
+        try:
+            with open(fp) as f:
+                payload = json.load(f)
+            row = payload.get("row") if isinstance(payload, dict) else None
+            entry_id = payload.get("entry_id") if isinstance(payload, dict) else None
+            if row is not None and entry_id is not None:
+                cache[entry_id] = row
+        except Exception as e:
+            print(f"  ⚠ Could not read cache file {fp}: {e}")
+    return cache
+
+
+def _checkpoint_row(row, cache_dir):
+    entry_id = row.get("entry_id")
+    if not entry_id:
+        return
+    payload = {"entry_id": entry_id, "row": _row_cacheable(row)}
+    _atomic_write_json(os.path.join(cache_dir, f"{entry_id}.json"), payload)
+
+
+def _write_live_outputs(results, cfg, work_dir):
+    if not results:
+        return
+    df_live = pd.DataFrame(results)
+    out_cols = [c for c in df_live.columns if c not in ("best_poscar","pm_poscar","dg_poscar","atoms","pm_top5","pm_atoms_dict","dg_atoms_dict","best_atoms_dict")]
+    _atomic_write_csv(cfg["output_csv"], df_live[out_cols])
+
+    live_json = os.path.join(work_dir, "all_results_live.json")
+    _atomic_write_json(live_json, [_entry_payload_from_row(r) for r in results])
+
+    poscar_mask = df_live["best_poscar"].fillna("").astype(str).str.strip().ne("") if "best_poscar" in df_live.columns else pd.Series(False, index=df_live.index)
+    poscar_entries = df_live.loc[poscar_mask]
+    if len(poscar_entries) > 0:
+        poscar_dict = {f"{r['mineral_name']}_{r['formula']}":r["best_poscar"] for _,r in poscar_entries.iterrows()}
+        _atomic_write_json(cfg["output_poscars"], poscar_dict)
+
+
+def _save_final_results(df, cfg):
+    from datetime import datetime
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    results_dir = f"rruff_results_{timestamp}"
+    entries_dir = os.path.join(results_dir, "entries")
+    os.makedirs(entries_dir, exist_ok=True)
+    print(f"\n{'═'*60}\nSAVING RESULTS → {results_dir}/\n{'═'*60}")
+
+    consolidated = []
+    for _, r in df.iterrows():
+        name = r["mineral_name"]; safe_name = re.sub(r"[^A-Za-z0-9_-]","_",name)
+        entry_data = _entry_payload_from_row(r)
+        with open(os.path.join(entries_dir, f"{safe_name}.json"),"w") as f:
+            json.dump(entry_data, f, indent=2, default=_json_default)
+        consolidated.append(entry_data)
+
+    print(f"✓ {len(consolidated)} per-entry JSONs → {entries_dir}/")
+
+    consolidated_path = os.path.join(results_dir, "all_results.json")
+    with open(consolidated_path,"w") as f: json.dump(consolidated, f, indent=2, default=_json_default)
+    print(f"✓ Consolidated JSON → {consolidated_path}")
+
+    csv_path = os.path.join(results_dir, "results.csv")
+    out_cols = [c for c in df.columns if c not in ("best_poscar","pm_poscar","dg_poscar","atoms","pm_top5","pm_atoms_dict","dg_atoms_dict","best_atoms_dict")]
+    df[out_cols].to_csv(csv_path, index=False)
+    print(f"✓ CSV summary → {csv_path}")
+    df[out_cols].to_csv(cfg["output_csv"], index=False)
+
+    poscar_mask = df["best_poscar"].fillna("").astype(str).str.strip().ne("") if "best_poscar" in df.columns else pd.Series(False, index=df.index)
+    poscar_entries = df.loc[poscar_mask]
+    if len(poscar_entries)>0:
+        poscar_dict = {f"{r['mineral_name']}_{r['formula']}":r["best_poscar"] for _,r in poscar_entries.iterrows()}
+        with open(cfg["output_poscars"],"w") as f: json.dump(poscar_dict, f, indent=2)
+
+    cfg_plots = dict(cfg); cfg_plots["output_csv"] = csv_path
+    lattice_comparison(df, cfg_plots)
+
+    n_pm = sum(1 for e in consolidated if e["pattern_matching"]["atoms_dict"])
+    n_dg = sum(1 for e in consolidated if e["diffractgpt"]["atoms_dict"])
+    n_best = sum(1 for e in consolidated if e["best_match"]["atoms_dict"])
+    print(f"\n✓ Atoms dicts saved: PM={n_pm}, DG={n_dg}, Best={n_best}")
+    print(f"✓ Results folder: {os.path.abspath(results_dir)}/")
+    print(
+        f"\n  To load:\n"
+        f"    import json; from jarvis.core.atoms import Atoms\n"
+        f"    with open('{consolidated_path}') as f: data = json.load(f)\n"
+        f"    atoms = Atoms.from_dict(data[0]['best_match']['atoms_dict'])\n"
+    )
+
+    return results_dir, consolidated, consolidated_path
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 def process_entry(entry, headers, cfg):
     name = entry["##NAMES"]
@@ -429,6 +584,23 @@ def run_pipeline(cfg):
     if cfg.get("max_abc"): print(f"Cell filter: RRUFF a,b,c ≤ {cfg['max_abc']} Å")
     print(f"{'═'*60}")
 
+    work_dir = os.path.dirname(os.path.abspath(cfg["output_csv"])) or "."
+    os.makedirs(work_dir, exist_ok=True)
+    cache_dir = os.path.join(work_dir, cfg["cache_dir"])
+    os.makedirs(cache_dir, exist_ok=True)
+
+    if cfg.get("overwrite_cache"):
+        for fn in os.listdir(cache_dir):
+            if fn.endswith(".json"):
+                try:
+                    os.remove(os.path.join(cache_dir, fn))
+                except Exception:
+                    pass
+
+    cached_rows = _load_cached_results(cache_dir) if cfg.get("resume", True) else {}
+    if cached_rows:
+        print(f"Found {len(cached_rows)} cached entries in {cache_dir}")
+
     results = []
     t_start = time.time()
     for idx, entry in enumerate(rruff_unique):
@@ -437,6 +609,7 @@ def run_pipeline(cfg):
         elements = _get_elements(formula)
         n_pts = len(entry["x"])
         rid = entry["##RRUFFID"]
+        entry_id = _entry_uid(entry)
 
         elapsed_total = time.time() - t_start
         avg_per = elapsed_total / max(idx, 1)
@@ -445,8 +618,23 @@ def run_pipeline(cfg):
 
         print(f"\n[{idx+1}/{n_total}] {name} {rid} ({formula}) — {n_pts} pts, elements={elements}  [elapsed: {elapsed_min:.1f}min, ETA: {eta_min:.1f}min]")
 
+        if entry_id in cached_rows:
+            row = dict(cached_rows[entry_id])
+            row["entry_id"] = entry_id
+            row["atoms"] = None
+            results.append(row)
+            if row.get("error") is None:
+                print("  ↺ Loaded from cache")
+            else:
+                print(f"  ↺ Loaded failed cached result: {row.get('error')}")
+            continue
+
         row = process_entry(entry, headers, cfg)
+        row["entry_id"] = entry_id
         results.append(row)
+        _checkpoint_row(row, cache_dir)
+        if ((idx + 1) % max(cfg.get("write_every", 1), 1) == 0) or (idx == n_total - 1):
+            _write_live_outputs(results, cfg, work_dir)
         if idx < n_total - 1: time.sleep(cfg["delay"])
 
     total_elapsed = time.time() - t_start
@@ -464,11 +652,21 @@ def run_pipeline(cfg):
             if entry is None: continue
             print(f"\n  Retrying: {name} ({formula})...")
             new_row = process_entry(entry, headers, cfg)
+            new_row["entry_id"] = row_data.get("entry_id") or _entry_uid(entry)
             if new_row.get("error") is None:
                 for k,v in new_row.items():
                     if k in df.columns: df.at[df_idx,k] = v
+                    else: df[k] = None; df.at[df_idx,k] = v
                 print(f"    ✓ Retry succeeded")
-            else: print(f"    ✗ Still failed: {new_row['error']}")
+            else:
+                for k,v in new_row.items():
+                    if k in df.columns: df.at[df_idx,k] = v
+                    else: df[k] = None; df.at[df_idx,k] = v
+                print(f"    ✗ Still failed: {new_row['error']}")
+            cache_row = df.loc[df_idx].to_dict()
+            cache_row["atoms"] = None
+            _checkpoint_row(cache_row, cache_dir)
+            _write_live_outputs(df.to_dict("records"), cfg, work_dir)
             time.sleep(retry_delay)
 
     # Summary
@@ -509,69 +707,7 @@ def run_pipeline(cfg):
         print(f"\nERRORS ({errors}):")
         for _,r in df[df["error"].notna()].iterrows(): print(f"  {r['mineral_name']:20s} → {r['error'][:80]}")
 
-    # ── Save to timestamped results folder ──
-    from datetime import datetime; import os
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    results_dir = f"rruff_results_{timestamp}"
-    entries_dir = os.path.join(results_dir, "entries")
-    os.makedirs(entries_dir, exist_ok=True)
-    print(f"\n{'═'*60}\nSAVING RESULTS → {results_dir}/\n{'═'*60}")
-
-    consolidated = []
-    for _, r in df.iterrows():
-        name = r["mineral_name"]; safe_name = re.sub(r"[^A-Za-z0-9_-]","_",name)
-        entry_data = {
-            "mineral_name":name,"rruff_id":r.get("rruff_id"),"formula":r.get("formula"),
-            "elements":r.get("elements"),"query_used":r.get("query_used"),"num_points":r.get("num_points"),
-            "rruff_cell":{"a":r.get("rruff_a"),"b":r.get("rruff_b"),"c":r.get("rruff_c"),
-                "alpha":r.get("rruff_alpha"),"beta":r.get("rruff_beta"),"gamma":r.get("rruff_gamma"),
-                "volume":r.get("rruff_volume"),"crystal_system":r.get("rruff_crystal_system")},
-            "pattern_matching":{"success":bool(r.get("pm_success")),"jid":r.get("pm_jid"),
-                "similarity":r.get("pm_similarity"),"formula":r.get("pm_formula"),
-                "spacegroup":r.get("pm_spacegroup"),"num_atoms":r.get("pm_num_atoms"),
-                "poscar":r.get("pm_poscar"),"atoms_dict":r.get("pm_atoms_dict")},
-            "diffractgpt":{"success":bool(r.get("dg_success")),"similarity":r.get("dg_similarity"),
-                "formula":r.get("dg_formula"),"spacegroup":r.get("dg_spacegroup"),
-                "num_atoms":r.get("dg_num_atoms"),"poscar":r.get("dg_poscar"),"atoms_dict":r.get("dg_atoms_dict")},
-            "best_match":{"method":r.get("best_method"),"similarity":r.get("best_similarity"),
-                "poscar":r.get("best_poscar"),"atoms_dict":r.get("best_atoms_dict")},
-            "predicted_cell":{"a":r.get("pred_a"),"b":r.get("pred_b"),"c":r.get("pred_c"),
-                "alpha":r.get("pred_alpha"),"beta":r.get("pred_beta"),"gamma":r.get("pred_gamma"),
-                "volume":r.get("pred_volume"),"cell_type":r.get("cell_type")},
-            "refinement":{"rwp":r.get("refinement_rwp"),"engine":r.get("refinement_engine")},
-            "time_s":r.get("time_s"),"error":r.get("error"),
-        }
-        with open(os.path.join(entries_dir, f"{safe_name}.json"),"w") as f:
-            json.dump(entry_data, f, indent=2, default=_json_default)
-        consolidated.append(entry_data)
-
-    print(f"✓ {len(consolidated)} per-entry JSONs → {entries_dir}/")
-
-    consolidated_path = os.path.join(results_dir, "all_results.json")
-    with open(consolidated_path,"w") as f: json.dump(consolidated, f, indent=2, default=_json_default)
-    print(f"✓ Consolidated JSON → {consolidated_path}")
-
-    csv_path = os.path.join(results_dir, "results.csv")
-    out_cols = [c for c in df.columns if c not in ("best_poscar","pm_poscar","dg_poscar","atoms","pm_top5","pm_atoms_dict","dg_atoms_dict","best_atoms_dict")]
-    df[out_cols].to_csv(csv_path, index=False)
-    print(f"✓ CSV summary → {csv_path}")
-    df[out_cols].to_csv(cfg["output_csv"], index=False)
-
-    poscar_entries = df[df["best_poscar"].notna()]
-    if len(poscar_entries)>0:
-        poscar_dict = {f"{r['mineral_name']}_{r['formula']}":r["best_poscar"] for _,r in poscar_entries.iterrows()}
-        with open(cfg["output_poscars"],"w") as f: json.dump(poscar_dict, f, indent=2)
-
-    cfg_plots = dict(cfg); cfg_plots["output_csv"] = csv_path
-    lattice_comparison(df, cfg_plots)
-
-    n_pm = sum(1 for e in consolidated if e["pattern_matching"]["atoms_dict"])
-    n_dg = sum(1 for e in consolidated if e["diffractgpt"]["atoms_dict"])
-    n_best = sum(1 for e in consolidated if e["best_match"]["atoms_dict"])
-    print(f"\n✓ Atoms dicts saved: PM={n_pm}, DG={n_dg}, Best={n_best}")
-    print(f"✓ Results folder: {os.path.abspath(results_dir)}/")
-    print(f"\n  To load:\n    import json; from jarvis.core.atoms import Atoms\n    with open('{consolidated_path}') as f: data = json.load(f)\n    atoms = Atoms.from_dict(data[0]['best_match']['atoms_dict'])\n")
-
+    _, consolidated, _ = _save_final_results(df, cfg)
     return df, consolidated
 
 
@@ -611,6 +747,10 @@ def parse_args():
     p.add_argument("--max-backoff", type=float, default=DEFAULTS["max_backoff"])
     p.add_argument("--output-csv", default=DEFAULTS["output_csv"])
     p.add_argument("--output-poscars", default=DEFAULTS["output_poscars"])
+    p.add_argument("--cache-dir", default=DEFAULTS["cache_dir"])
+    p.add_argument("--no-resume", action="store_true")
+    p.add_argument("--overwrite-cache", action="store_true")
+    p.add_argument("--write-every", type=int, default=DEFAULTS["write_every"])
     args = p.parse_args()
     return {
         "base_url":args.base_url,"api_key":args.api_key,"method":args.method,
@@ -626,6 +766,9 @@ def parse_args():
         "backoff_multiplier":DEFAULTS["backoff_multiplier"],
         "max_backoff":args.max_backoff,
         "output_csv":args.output_csv,"output_poscars":args.output_poscars,
+        "cache_dir":args.cache_dir,"resume":not args.no_resume,
+        "overwrite_cache":args.overwrite_cache,
+        "write_every":max(1, args.write_every),
     }
 
 if __name__ == "__main__":
