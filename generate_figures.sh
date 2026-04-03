@@ -6,4 +6,5 @@ echo "plot_match_rate_crystal_systems.py"
 python plot_match_rate_crystal_systems.py
 echo "stoich"
 bash stoich.sh
+echo "end script"
 
