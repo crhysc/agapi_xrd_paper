@@ -14,7 +14,7 @@ from scipy.stats import gaussian_kde, entropy
 from scipy.spatial.distance import jensenshannon
 import matplotlib
 import matplotlib.pyplot as plt
-%matplotlib inline
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Config
 # ═══════════════════════════════════════════════════════════════════════════
