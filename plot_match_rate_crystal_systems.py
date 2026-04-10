@@ -59,7 +59,7 @@ def parse_args():
         "--max-val",
         type=float,
         default=15.0,
-        help="Maximum allowed RRUFF a, b, c value for filtering (default: 15.0).",
+        help="Maximum allowed RRUFF a, b, c value for filtering (inclusive, default: 15.0).",
     )
     parser.add_argument(
         "--output-dir",
@@ -150,11 +150,11 @@ def _locate_method_files(method_dir: Path) -> Tuple[Path, Optional[Path]]:
     Returns:
       results_csv_path
       all_results_json_path (or None if not found)
+
     Preference:
       1) newest timestamped rruff_results_*/results.csv + all_results.json
       2) top-level method-specific CSV / results.csv
     """
-    # timestamped dirs
     ts_dirs = sorted(method_dir.glob("rruff_results_*"), key=lambda p: p.name)
     if ts_dirs:
         newest = ts_dirs[-1]
@@ -163,7 +163,6 @@ def _locate_method_files(method_dir: Path) -> Tuple[Path, Optional[Path]]:
         if results_csv.is_file():
             return results_csv, all_results if all_results.is_file() else None
 
-    # top-level fallbacks
     top_csv_candidates = [
         method_dir / "results.csv",
         method_dir / f"{method_dir.name}_results.csv",
@@ -189,7 +188,7 @@ def _build_filter_mask(df: pd.DataFrame, max_val: float) -> pd.Series:
             raise KeyError(f"Missing required column for max-val filtering: {col}")
 
     mask = df["rruff_a"].notna() & df["rruff_b"].notna() & df["rruff_c"].notna()
-    mask &= (df["rruff_a"] < max_val) & (df["rruff_b"] < max_val) & (df["rruff_c"] < max_val)
+    mask &= (df["rruff_a"] <= max_val) & (df["rruff_b"] <= max_val) & (df["rruff_c"] <= max_val)
     return mask
 
 
@@ -216,7 +215,6 @@ def _load_method_payload(
     filter_mask = _build_filter_mask(df, max_val)
     error_mask = _safe_str_series(df, "error").str.strip() != ""
 
-    # Match-rate info computed inside the filtered subset
     pm_success = _safe_bool_series(df, "pm_success")
     dg_success = _safe_bool_series(df, "dg_success")
 
@@ -242,10 +240,8 @@ def _load_method_payload(
         "unmatched_for_pie": int(filtered_valid_rows - int(pm_success_valid.sum())),
     }
 
-    # Crystal systems
     crystal_systems: List[str] = []
 
-    # Preferred route: use all_results.json if present and row-aligned with results.csv
     if all_results_path is not None:
         try:
             with open(all_results_path, "r") as f:
@@ -262,7 +258,6 @@ def _load_method_payload(
                     if cs in CRYSYS_ORDER:
                         crystal_systems.append(cs)
             else:
-                # Robust fallback if JSON and CSV lengths diverge
                 if "rruff_crystal_system" in df.columns:
                     cs_series = df.loc[filter_mask, "rruff_crystal_system"].map(_normalize_crysys)
                     crystal_systems = [cs for cs in cs_series.dropna().tolist() if cs in CRYSYS_ORDER]
@@ -280,6 +275,18 @@ def _load_method_payload(
         crystal_systems = [cs for cs in cs_series.dropna().tolist() if cs in CRYSYS_ORDER]
 
     return crystal_systems, match_rate_info, runs_dir
+
+
+def _get_reference_match_info(loaded_data):
+    """
+    Pattern matching occurs before refinement, so it should not be summed
+    across refinement methods. Use a single reference method.
+    Prefer no_refinement if present; otherwise use the first entry.
+    """
+    for method_key, method_name, color, cs_list, match_info in loaded_data:
+        if method_key == "no_refinement":
+            return method_name, match_info
+    return loaded_data[0][1], loaded_data[0][4]
 
 
 # ── plotting ───────────────────────────────────────────────────────
@@ -310,7 +317,7 @@ def plot_single_crysys(
     ax.set_xticklabels(CRYSYS_LABELS, rotation=25)
     ax.set_xlabel("Crystal system", fontsize=30)
     ax.set_ylabel("% of filtered structures", fontsize=30)
-    ax.set_title(f"Crystal Systems\n{method_name}  (a,b,c < {max_val:g} Å)", fontsize=36)
+    ax.set_title(f"Crystal Systems\n{method_name}  (a,b,c ≤ {max_val:g} Å)", fontsize=36)
     plt.xticks(fontsize=23)
     plt.yticks(fontsize=23)
 
@@ -344,7 +351,7 @@ def plot_overlaid_crysys(loaded_data, out_dir: Path, max_val: float) -> None:
     ax.set_xticklabels(CRYSYS_LABELS, rotation=25)
     ax.set_xlabel("Crystal system", fontsize=24)
     ax.set_ylabel("% of filtered structures", fontsize=24)
-    ax.set_title(f"Crystal Systems by Refinement Method  (RRUFF a,b,c < {max_val:g} Å)", fontsize=30)
+    ax.set_title(f"Crystal Systems by Refinement Method  (RRUFF a,b,c ≤ {max_val:g} Å)", fontsize=30)
     ax.legend(fontsize=15, frameon=False)
     plt.xticks(fontsize=18)
     plt.yticks(fontsize=18)
@@ -358,53 +365,31 @@ def plot_overlaid_crysys(loaded_data, out_dir: Path, max_val: float) -> None:
     print(f"✓ wrote {out_png}")
 
 
-def plot_match_rate_bar(loaded_data, out_dir: Path, max_val: float) -> None:
-    method_names = []
-    rates = []
-    colors = []
-    counts_text = []
+def plot_pattern_matching_pie(loaded_data, out_dir: Path, max_val: float) -> None:
+    ref_method_name, match_info = _get_reference_match_info(loaded_data)
 
-    for _, method_name, color, _, match_info in loaded_data:
-        method_names.append(method_name)
-        rates.append(match_info["pm_match_rate_percent"])
-        colors.append(color)
-        counts_text.append(f"{match_info['pm_success_n']}/{match_info['filtered_valid_rows']}")
+    matched = int(match_info["pm_success_n"])
+    unmatched = int(match_info["unmatched_for_pie"])
+    valid_rows = int(match_info["filtered_valid_rows"])
 
-    x = np.arange(len(method_names))
+    fig, ax = plt.subplots(figsize=(8.5, 8.5), constrained_layout=True)
 
-    fig, ax = plt.subplots(figsize=(10.5, 8.5), constrained_layout=True)
-
-    bars = ax.bar(
-        x,
-        rates,
-        width=0.62,
-        alpha=0.84,
-        linewidth=0.0,
-        edgecolor="none",
-        color=colors,
+    ax.pie(
+        [matched, unmatched],
+        labels=[f"Matched\n{matched}", f"Unmatched\n{unmatched}"],
+        colors=[MATCH_GREEN, UNMATCHED_GRAY],
+        autopct="%1.1f%%",
+        startangle=90,
+        counterclock=False,
+        textprops={"fontsize": 16},
+    )
+    ax.set_title(
+        f"Pattern-Matching Match Rate\n"
+        f"(filtered pre-refinement set: {ref_method_name}, n={valid_rows}, a,b,c ≤ {max_val:g} Å)",
+        fontsize=22,
     )
 
-    ax.set_xticks(x)
-    ax.set_xticklabels(method_names, rotation=20, ha="right")
-    ax.set_ylabel("Pattern-matching match rate (%)", fontsize=24)
-    ax.set_title(f"Pattern-Matching Match Rate  (RRUFF a,b,c < {max_val:g} Å)", fontsize=28)
-    ax.set_ylim(0, max(100, 1.12 * max(rates) if len(rates) else 100))
-    plt.xticks(fontsize=18)
-    plt.yticks(fontsize=18)
-
-    _style_axes_like_grid(ax)
-
-    for bar, rate, label in zip(bars, rates, counts_text):
-        ax.text(
-            bar.get_x() + bar.get_width() / 2.0,
-            bar.get_height() + 1.0,
-            f"{rate:.1f}%\n({label})",
-            ha="center",
-            va="bottom",
-            fontsize=14,
-        )
-
-    out_png = out_dir / f"pattern_matching_match_rate_max_{str(max_val).replace('.', 'p')}.png"
+    out_png = out_dir / f"pattern_matching_match_rate_pie_max_{str(max_val).replace('.', 'p')}.png"
     plt.savefig(out_png, format="png", dpi=220, bbox_inches="tight")
     plt.close(fig)
 
@@ -412,12 +397,11 @@ def plot_match_rate_bar(loaded_data, out_dir: Path, max_val: float) -> None:
 
 
 def plot_crysys_overlay_plus_match_pie(loaded_data, out_dir: Path, max_val: float) -> None:
-    total_matched = 0
-    total_unmatched = 0
+    method_name_ref, match_info = _get_reference_match_info(loaded_data)
 
-    for _, _, _, _, match_info in loaded_data:
-        total_matched += int(match_info["matched_for_pie"])
-        total_unmatched += int(match_info["unmatched_for_pie"])
+    matched = int(match_info["pm_success_n"])
+    unmatched = int(match_info["unmatched_for_pie"])
+    valid_rows = int(match_info["filtered_valid_rows"])
 
     x = np.arange(len(CRYSYS_ORDER))
 
@@ -443,30 +427,30 @@ def plot_crysys_overlay_plus_match_pie(loaded_data, out_dir: Path, max_val: floa
     ax_top.set_xticklabels(CRYSYS_LABELS, rotation=25)
     ax_top.set_xlabel("Crystal system", fontsize=22)
     ax_top.set_ylabel("% of filtered structures", fontsize=22)
-    ax_top.set_title(f"Crystal Systems by Refinement Method  (RRUFF a,b,c < {max_val:g} Å)", fontsize=28)
+    ax_top.set_title(
+        f"Crystal Systems by Refinement Method  (RRUFF a,b,c ≤ {max_val:g} Å)",
+        fontsize=28,
+    )
     ax_top.legend(fontsize=14, frameon=False)
     plt.sca(ax_top)
     plt.xticks(fontsize=16)
     plt.yticks(fontsize=16)
     _style_axes_like_grid(ax_top)
 
-    pie_vals = [total_matched, total_unmatched]
-    pie_labels = [
-        f"Matched\n{total_matched}",
-        f"Unmatched\n{total_unmatched}",
-    ]
-    pie_colors = [MATCH_GREEN, UNMATCHED_GRAY]
-
     ax_pie.pie(
-        pie_vals,
-        labels=pie_labels,
-        colors=pie_colors,
+        [matched, unmatched],
+        labels=[f"Matched\n{matched}", f"Unmatched\n{unmatched}"],
+        colors=[MATCH_GREEN, UNMATCHED_GRAY],
         autopct="%1.1f%%",
         startangle=90,
         counterclock=False,
         textprops={"fontsize": 16},
     )
-    ax_pie.set_title("Aggregate Pattern-Matching Match Rate", fontsize=24)
+    ax_pie.set_title(
+        f"Pattern-Matching Match Rate\n"
+        f"(single filtered pre-refinement result set: {method_name_ref}, n={valid_rows})",
+        fontsize=24,
+    )
 
     out_png = out_dir / f"crystal_systems_overlaid_plus_match_rate_pie_max_{str(max_val).replace('.', 'p')}.png"
     plt.savefig(out_png, format="png", dpi=220, bbox_inches="tight")
@@ -496,7 +480,6 @@ def main() -> None:
     out_dir = Path(args.output_dir) if args.output_dir is not None else runs_dir / "refinement_summary_figures"
     _ensure_dir(out_dir)
 
-    # individual histograms
     for method_key, method_name, color, cs_list, _ in loaded_data:
         plot_single_crysys(
             cs_list=cs_list,
@@ -507,14 +490,9 @@ def main() -> None:
             max_val=args.max_val,
         )
 
-    # overlaid crystal-system plot
     plot_overlaid_crysys(loaded_data, out_dir=out_dir, max_val=args.max_val)
-
-    # combined overlaid plot + aggregate PM pie
     plot_crysys_overlay_plus_match_pie(loaded_data, out_dir=out_dir, max_val=args.max_val)
-
-    # PM match-rate bar plot
-    plot_match_rate_bar(loaded_data, out_dir=out_dir, max_val=args.max_val)
+    plot_pattern_matching_pie(loaded_data, out_dir=out_dir, max_val=args.max_val)
 
     print(f"\n✓ all figures written to: {out_dir}")
 
