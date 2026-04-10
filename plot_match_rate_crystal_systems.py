@@ -157,30 +157,34 @@ def _get_reference(loaded):
 
 
 def plot_side_by_side(loaded, out_dir, max_val):
-    name_ref, info = _get_reference(loaded)
+    _, info = _get_reference(loaded)
 
     matched = info["pm_success_n"]
     unmatched = info["unmatched_for_pie"]
     n = info["filtered_valid_rows"]
 
     x = np.arange(len(CRYSYS_ORDER))
+    width = 0.24
+    offsets = [-width, 0.0, width]
 
     fig, (ax1, ax2) = plt.subplots(
-        1, 2,
-        figsize=(13.5, 5.2),
-        gridspec_kw={"width_ratios": [1.75, 1.0]},
-        constrained_layout=True
+        1,
+        2,
+        figsize=(14.2, 5.4),
+        gridspec_kw={"width_ratios": [1.9, 1.0]},
+        constrained_layout=True,
     )
 
-    for k, name, color, cs, _ in loaded:
-        ax1.plot(
-            x,
-            _crysys_hist(cs),
-            marker="o",
-            linewidth=2.4,
-            markersize=7,
-            label=f"{name} (n={len(cs)})",
+    for (offset, (k, name, color, cs, _)) in zip(offsets, loaded):
+        heights = _crysys_hist(cs)
+        ax1.bar(
+            x + offset,
+            heights,
+            width=width,
             color=color,
+            alpha=0.9,
+            edgecolor="none",
+            label=f"{name} (n={len(cs)})",
         )
 
     ax1.set_xticks(x)
@@ -188,7 +192,7 @@ def plot_side_by_side(loaded, out_dir, max_val):
     ax1.set_ylabel("% of filtered structures", fontsize=14)
     ax1.set_xlabel("Crystal system", fontsize=14)
     ax1.set_title(f"Crystal Systems (a,b,c ≤ {max_val:g} Å)", fontsize=16)
-    ax1.legend(frameon=False, fontsize=11)
+    ax1.legend(frameon=False, fontsize=10)
     ax1.tick_params(axis="y", labelsize=12)
     _style_axes_like_grid(ax1)
 
