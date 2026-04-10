@@ -232,13 +232,12 @@ def plot_mae_figure(
         title="Lattice Parameter",
         title_fontsize=14,
         fontsize=13,
-        ncol=1,
-        loc="center left",
-        bbox_to_anchor=(1.02, 0.5),
-        borderaxespad=0.0,
+        ncol=2,
+        loc="upper right",
+        frameon=True,
     )
 
-    plt.tight_layout(rect=[0, 0, 0.84, 1])
+    plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
