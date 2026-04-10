@@ -271,7 +271,7 @@ def save_distribution_plot(metrics, kld_results, output_dir, n, val):
         ax.hist(
             exp,
             bins=bins,
-            alpha=0.40,
+            alpha=0.60,
             density=True,
             label="RRUFF (exp)",
             color=EXP_COLOR,
@@ -281,7 +281,7 @@ def save_distribution_plot(metrics, kld_results, output_dir, n, val):
         ax.hist(
             pred,
             bins=bins,
-            alpha=0.40,
+            alpha=0.60,
             density=True,
             label="Predicted",
             color=PRED_COLOR,
