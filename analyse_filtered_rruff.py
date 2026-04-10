@@ -46,6 +46,10 @@ UNITS = {
     "volume": "Å^3",
 }
 
+# Explicit plot colors so reruns remain visually stable
+EXP_COLOR = "#4C78A8"      # elegant blue
+PRED_COLOR = "#E76FAD"     # elegant pink
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -267,26 +271,40 @@ def save_distribution_plot(metrics, kld_results, output_dir, n, val):
         ax.hist(
             exp,
             bins=bins,
-            alpha=0.45,
+            alpha=0.40,
             density=True,
             label="RRUFF (exp)",
+            color=EXP_COLOR,
             edgecolor="white",
             linewidth=0.5,
         )
         ax.hist(
             pred,
             bins=bins,
-            alpha=0.45,
+            alpha=0.40,
             density=True,
             label="Predicted",
+            color=PRED_COLOR,
             edgecolor="white",
             linewidth=0.5,
         )
 
         try:
             x_grid = np.linspace(lo - margin, hi + margin, 300)
-            ax.plot(x_grid, gaussian_kde(exp)(x_grid), linewidth=2, label="KDE exp")
-            ax.plot(x_grid, gaussian_kde(pred)(x_grid), linewidth=2, label="KDE pred")
+            ax.plot(
+                x_grid,
+                gaussian_kde(exp)(x_grid),
+                linewidth=2.2,
+                color=EXP_COLOR,
+                label="KDE exp",
+            )
+            ax.plot(
+                x_grid,
+                gaussian_kde(pred)(x_grid),
+                linewidth=2.2,
+                color=PRED_COLOR,
+                label="KDE pred",
+            )
         except Exception:
             pass
 
