@@ -15,10 +15,12 @@ It will:
   - print summary metrics to stdout
   - save plots into the output directory
   - save a JSON summary into the output directory
+  - save a TOML summary into the output directory
 """
 
 import os
 import json
+import math
 import argparse
 
 import numpy as np
@@ -59,7 +61,7 @@ def parse_args():
         "--output-dir",
         "-o",
         required=True,
-        help="Directory where plots and summary JSON will be saved",
+        help="Directory where plots and summary files will be saved",
     )
     parser.add_argument(
         "--max-val",
@@ -221,7 +223,10 @@ def save_parity_plot(metrics, output_dir, n, val):
         ax.set_aspect("equal")
         ax.set_xlabel(f"RRUFF {p} ({UNITS[p]})", fontsize=10)
         ax.set_ylabel(f"Predicted {p} ({UNITS[p]})", fontsize=10)
-        ax.set_title(f"{p}  MAE={mae:.3f}  R²={r2 if r2 is not None else float('nan'):.3f}", fontsize=11)
+        ax.set_title(
+            f"{p}  MAE={mae:.3f}  R²={r2 if r2 is not None else float('nan'):.3f}",
+            fontsize=11,
+        )
         ax.grid(True, alpha=0.15)
 
     for j in range(len(ALL_PARAMS), len(axes)):
@@ -259,10 +264,24 @@ def save_distribution_plot(metrics, kld_results, output_dir, n, val):
         margin = 0.05 * (hi - lo + 1)
         bins = np.linspace(lo - margin, hi + margin, min(40, max(10, len(exp) // 5)))
 
-        ax.hist(exp, bins=bins, alpha=0.45, density=True, label="RRUFF (exp)",
-                edgecolor="white", linewidth=0.5)
-        ax.hist(pred, bins=bins, alpha=0.45, density=True, label="Predicted",
-                edgecolor="white", linewidth=0.5)
+        ax.hist(
+            exp,
+            bins=bins,
+            alpha=0.45,
+            density=True,
+            label="RRUFF (exp)",
+            edgecolor="white",
+            linewidth=0.5,
+        )
+        ax.hist(
+            pred,
+            bins=bins,
+            alpha=0.45,
+            density=True,
+            label="Predicted",
+            edgecolor="white",
+            linewidth=0.5,
+        )
 
         try:
             x_grid = np.linspace(lo - margin, hi + margin, 300)
@@ -306,8 +325,13 @@ def save_error_distribution_plot(metrics, output_dir, n, val):
         delta = metrics[p]["delta"]
         mean_d = metrics[p]["mean_delta"]
 
-        ax.hist(delta, bins=max(10, len(delta) // 5), alpha=0.8, density=True,
-                edgecolor="white")
+        ax.hist(
+            delta,
+            bins=max(10, len(delta) // 5),
+            alpha=0.8,
+            density=True,
+            edgecolor="white",
+        )
         ax.axvline(0, linestyle="--", linewidth=1.5, alpha=0.7)
         ax.axvline(mean_d, linewidth=1.5, alpha=0.7, label=f"mean={mean_d:+.3f}")
 
@@ -465,7 +489,7 @@ def save_error_by_crystal_plot(df_clean, output_dir, n, val):
     print(f"✓ Saved {outpath}")
 
 
-def save_summary_json(metrics, kld_results, output_dir, input_csv, n_total, n_filtered, max_val):
+def build_summary(df_clean, metrics, kld_results, input_csv, n_total, n_filtered, max_val):
     summary = {
         "input_csv": input_csv,
         "n_total": int(n_total),
@@ -474,24 +498,111 @@ def save_summary_json(metrics, kld_results, output_dir, input_csv, n_total, n_fi
         "metrics": {},
     }
 
+    if "best_method" in df_clean.columns:
+        summary["method_breakdown"] = {
+            str(method): int(count)
+            for method, count in df_clean["best_method"].value_counts().items()
+        }
+
+    if "rruff_crystal_system" in df_clean.columns:
+        summary["crystal_system_breakdown"] = {
+            str(cs): int(count)
+            for cs, count in df_clean["rruff_crystal_system"].value_counts().items()
+        }
+
     for p in ALL_PARAMS:
         if p not in metrics:
             continue
 
+        r2_val = metrics[p]["r2"]
         summary["metrics"][p] = {
-            "mae": metrics[p]["mae"],
-            "rmse": metrics[p]["rmse"],
-            "r2": metrics[p]["r2"],
-            "mean_delta": metrics[p]["mean_delta"],
-            "median_abs": metrics[p]["median_abs"],
-            "n": metrics[p]["n"],
-            "jsd": kld_results.get(p, {}).get("jsd"),
-            "kld": kld_results.get(p, {}).get("kld"),
+            "unit": UNITS[p],
+            "mae": float(metrics[p]["mae"]),
+            "rmse": float(metrics[p]["rmse"]),
+            "r2": float(r2_val) if r2_val is not None else float("nan"),
+            "mean_delta": float(metrics[p]["mean_delta"]),
+            "median_abs": float(metrics[p]["median_abs"]),
+            "n": int(metrics[p]["n"]),
+            "jsd": float(kld_results.get(p, {}).get("jsd", float("nan"))),
+            "kld": float(kld_results.get(p, {}).get("kld", float("nan"))),
         }
 
+    return summary
+
+
+def _toml_escape_string(value):
+    return (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+    )
+
+
+def _toml_format_scalar(value):
+    if isinstance(value, bool):
+        return "true" if value else "false"
+
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+
+    if isinstance(value, float):
+        if math.isnan(value):
+            return "nan"
+        if math.isinf(value):
+            return "inf" if value > 0 else "-inf"
+        return repr(value)
+
+    if value is None:
+        return "nan"
+
+    return f"\"{_toml_escape_string(value)}\""
+
+
+def _toml_dump_dict(data, parent_key=""):
+    lines = []
+    scalar_items = []
+    dict_items = []
+
+    for key, value in data.items():
+        if isinstance(value, dict):
+            dict_items.append((key, value))
+        else:
+            scalar_items.append((key, value))
+
+    if parent_key:
+        lines.append(f"[{parent_key}]")
+
+    for key, value in scalar_items:
+        lines.append(f"{key} = {_toml_format_scalar(value)}")
+
+    if scalar_items and dict_items:
+        lines.append("")
+
+    for i, (key, value) in enumerate(dict_items):
+        child_key = f"{parent_key}.{key}" if parent_key else key
+        child_lines = _toml_dump_dict(value, child_key)
+        lines.extend(child_lines)
+        if i != len(dict_items) - 1:
+            lines.append("")
+
+    return lines
+
+
+def save_summary_json(summary, output_dir):
     outpath = os.path.join(output_dir, "analysis_summary.json")
-    with open(outpath, "w") as f:
-        json.dump(summary, f, indent=2)
+    with open(outpath, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2, ensure_ascii=False)
+
+    print(f"✓ Saved {outpath}")
+
+
+def save_summary_toml(summary, output_dir):
+    outpath = os.path.join(output_dir, "analysis_summary.toml")
+    toml_text = "\n".join(_toml_dump_dict(summary)) + "\n"
+
+    with open(outpath, "w", encoding="utf-8") as f:
+        f.write(toml_text)
 
     print(f"✓ Saved {outpath}")
 
@@ -524,6 +635,7 @@ def print_summary(metrics, kld_results, n, val, output_dir):
     print(f"  {os.path.join(output_dir, 'error_by_method_filtered.png')}")
     print(f"  {os.path.join(output_dir, 'error_by_crystal_filtered.png')}")
     print(f"  {os.path.join(output_dir, 'analysis_summary.json')}")
+    print(f"  {os.path.join(output_dir, 'analysis_summary.toml')}")
 
 
 def main():
@@ -542,15 +654,18 @@ def main():
     save_error_by_method_plot(df_clean, args.output_dir, n, args.max_val)
     save_error_by_crystal_plot(df_clean, args.output_dir, n, args.max_val)
 
-    save_summary_json(
+    summary = build_summary(
+        df_clean=df_clean,
         metrics=metrics,
         kld_results=kld_results,
-        output_dir=args.output_dir,
         input_csv=args.input,
         n_total=len(df),
         n_filtered=len(df_clean),
         max_val=args.max_val,
     )
+
+    save_summary_json(summary, args.output_dir)
+    save_summary_toml(summary, args.output_dir)
 
     print_summary(metrics, kld_results, n, args.max_val, args.output_dir)
 
