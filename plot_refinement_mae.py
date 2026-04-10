@@ -222,12 +222,7 @@ def plot_mae_figure(
     ax.set_ylim(0, 1.15 * len_max if len_max > 0 else 1.0)
     ax2.set_ylim(0, 1.15 * ang_max if ang_max > 0 else 1.0)
 
-    style_axes(
-        ax,
-        ax2,
-        labels,
-        title=title,
-    )
+    style_axes(ax, ax2, labels, title=title)
 
     h1, l1 = ax.get_legend_handles_labels()
     h2, l2 = ax2.get_legend_handles_labels()
@@ -237,11 +232,13 @@ def plot_mae_figure(
         title="Lattice Parameter",
         title_fontsize=14,
         fontsize=13,
-        ncol=2,
-        loc="upper left",
+        ncol=1,
+        loc="center left",
+        bbox_to_anchor=(1.02, 0.5),
+        borderaxespad=0.0,
     )
 
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0, 0.84, 1])
     plt.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
@@ -262,10 +259,7 @@ plot_all_path = RUNS / "refinement_mae_all6.png"
 plot_mae_figure(
     summary=summary,
     output_path=plot_all_path,
-    title=(
-        "Mean Absolute Error by Refinement Method\n"
-        "Warm bars: lengths (Å) | Cool bars: angles (°)"
-    ),
+    title="Mean Absolute Error by Refinement Method",
     figsize=(13, 8),
 )
 
@@ -278,10 +272,7 @@ plot_bmgn_path = RUNS / "refinement_mae_bmgn_vs_bmgn_alignnff.png"
 plot_mae_figure(
     summary=bmgn_subset,
     output_path=plot_bmgn_path,
-    title=(
-        "Mean Absolute Error: BMGN vs BMGN + ALIGNN-FF\n"
-        "Warm bars: lengths (Å) | Cool bars: angles (°)"
-    ),
+    title="BMGN vs. BMGN + ALIGNN-FF\nMean Absolute Error",
     figsize=(10, 7),
 )
 
