@@ -447,8 +447,7 @@ def plot_crysys_overlay_plus_match_pie(loaded_data, out_dir: Path, max_val: floa
         textprops={"fontsize": 16},
     )
     ax_pie.set_title(
-        f"Pattern-Matching Match Rate\n"
-        f"(single filtered pre-refinement result set: {method_name_ref}, n={valid_rows})",
+        f"Pattern-Matching Match Rate n={valid_rows}",
         fontsize=24,
     )
 
