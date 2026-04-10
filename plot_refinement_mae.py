@@ -262,17 +262,17 @@ plot_mae_figure(
     figsize=(13, 8),
 )
 
-# BMGN vs BMGN+ALIGNN-FF figure
-bmgn_subset = summary[
-    summary["refinement_key"].isin(["bmgn", "bmgn_alignnff"])
+# No refinement vs BMGN vs BMGN+ALIGNN-FF figure
+comparison_subset = summary[
+    summary["refinement_key"].isin(["no_refinement", "bmgn", "bmgn_alignnff"])
 ].copy()
 
-plot_bmgn_path = RUNS / "refinement_mae_bmgn_vs_bmgn_alignnff.png"
+plot_bmgn_path = RUNS / "refinement_mae_no_refinement_vs_bmgn_vs_bmgn_alignnff.png"
 plot_mae_figure(
-    summary=bmgn_subset,
+    summary=comparison_subset,
     output_path=plot_bmgn_path,
-    title="BMGN vs. BMGN + ALIGNN-FF\nMean Absolute Error",
-    figsize=(10, 7),
+    title="No Refinement vs. BMGN vs. BMGN + ALIGNN-FF\nMean Absolute Error",
+    figsize=(11, 7),
 )
 
 # ───────────────────────── console summary ─────────────────────────
@@ -286,6 +286,6 @@ display_cols = (
 print("\nMAE summary:")
 print(summary[display_cols].to_string(index=False))
 print(f"\nSaved full plot:        {plot_all_path}")
-print(f"Saved BMGN comparison:  {plot_bmgn_path}")
+print(f"Saved comparison plot:  {plot_bmgn_path}")
 print(f"Saved summary:          {summary_path}")
 print("DEBUG: All done.", file=sys.stderr)
