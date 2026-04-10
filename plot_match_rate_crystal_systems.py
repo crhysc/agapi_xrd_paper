@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 from typing import Optional, List, Tuple, Dict
@@ -42,11 +43,37 @@ CRYSYS_ORDER = [
     "monoclinic",
     "orthorhombic",
     "tetragonal",
-    "trigonal",
     "hexagonal",
     "cubic",
+    "rhombohedral",
 ]
 CRYSYS_LABELS = [s.capitalize() for s in CRYSYS_ORDER]
+
+
+# ── CLI ────────────────────────────────────────────────────────────
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Plot crystal-system distributions for refinement runs with optional max abc filtering."
+    )
+    parser.add_argument(
+        "--max-val",
+        type=float,
+        default=15.0,
+        help="Maximum allowed RRUFF a, b, c value for filtering (default: 15.0).",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Optional output directory. Defaults to runs/refinement_summary_figures.",
+    )
+    parser.add_argument(
+        "--symprec",
+        type=float,
+        default=0.1,
+        help="Symmetry tolerance for determining crystal system from atoms_dict (default: 0.1).",
+    )
+    return parser.parse_args()
 
 
 # ── helpers ────────────────────────────────────────────────────────
@@ -69,13 +96,6 @@ def _find_runs_root(start: Path) -> Path:
     )
 
 
-def _newest_results_dir(method_dir: Path) -> Path:
-    candidates = sorted(method_dir.glob("rruff_results_*"), key=lambda p: p.name)
-    if not candidates:
-        raise FileNotFoundError(f"No timestamped rruff_results_* directory found in {method_dir}")
-    return candidates[-1]
-
-
 def _safe_bool_series(df: pd.DataFrame, col: str) -> pd.Series:
     if col not in df.columns:
         return pd.Series(False, index=df.index, dtype=bool)
@@ -95,6 +115,15 @@ def _pct(num: int, den: int) -> float:
     return 100.0 * num / den if den > 0 else float("nan")
 
 
+def _normalize_crysys(cs: Optional[str]) -> Optional[str]:
+    if cs is None:
+        return None
+    cs = str(cs).strip().lower()
+    if cs == "trigonal":
+        return "rhombohedral"
+    return cs
+
+
 def _get_crystal_system_from_atoms_dict(atoms_dict: dict, symprec: float = 0.1) -> Optional[str]:
     try:
         atoms_j = JarvisAtoms.from_dict(atoms_dict)
@@ -102,7 +131,8 @@ def _get_crystal_system_from_atoms_dict(atoms_dict: dict, symprec: float = 0.1) 
         sga = SpacegroupAnalyzer(pmg, symprec=symprec)
         conv = sga.get_conventional_standard_structure()
         cs = SpacegroupAnalyzer(conv, symprec=symprec).get_crystal_system()
-        return cs.lower() if isinstance(cs, str) else None
+        cs = _normalize_crysys(cs)
+        return cs if cs in CRYSYS_ORDER else None
     except Exception:
         return None
 
@@ -115,13 +145,64 @@ def _crysys_percent_hist(cs_list: List[str]) -> np.ndarray:
     return np.array([(counts.get(cs, 0) / total) * 100.0 for cs in CRYSYS_ORDER], dtype=float)
 
 
-def _load_method_payload(method_key: str) -> Tuple[List[str], Dict[str, float], Path, Path]:
+def _locate_method_files(method_dir: Path) -> Tuple[Path, Optional[Path]]:
+    """
+    Returns:
+      results_csv_path
+      all_results_json_path (or None if not found)
+    Preference:
+      1) newest timestamped rruff_results_*/results.csv + all_results.json
+      2) top-level method-specific CSV / results.csv
+    """
+    # timestamped dirs
+    ts_dirs = sorted(method_dir.glob("rruff_results_*"), key=lambda p: p.name)
+    if ts_dirs:
+        newest = ts_dirs[-1]
+        results_csv = newest / "results.csv"
+        all_results = newest / "all_results.json"
+        if results_csv.is_file():
+            return results_csv, all_results if all_results.is_file() else None
+
+    # top-level fallbacks
+    top_csv_candidates = [
+        method_dir / "results.csv",
+        method_dir / f"{method_dir.name}_results.csv",
+    ]
+    top_json_candidates = [
+        method_dir / "all_results.json",
+        method_dir / f"{method_dir.name}_all_results.json",
+    ]
+
+    results_csv = next((p for p in top_csv_candidates if p.is_file()), None)
+    all_results = next((p for p in top_json_candidates if p.is_file()), None)
+
+    if results_csv is None:
+        raise FileNotFoundError(f"Could not find results CSV for {method_dir}")
+
+    return results_csv, all_results
+
+
+def _build_filter_mask(df: pd.DataFrame, max_val: float) -> pd.Series:
+    needed = ["rruff_a", "rruff_b", "rruff_c"]
+    for col in needed:
+        if col not in df.columns:
+            raise KeyError(f"Missing required column for max-val filtering: {col}")
+
+    mask = df["rruff_a"].notna() & df["rruff_b"].notna() & df["rruff_c"].notna()
+    mask &= (df["rruff_a"] < max_val) & (df["rruff_b"] < max_val) & (df["rruff_c"] < max_val)
+    return mask
+
+
+def _load_method_payload(
+    method_key: str,
+    max_val: float,
+    symprec: float,
+) -> Tuple[List[str], Dict[str, float], Path]:
     """
     Returns:
       crystal_systems
       match_rate_info
       runs_dir
-      results_dir
     """
     root = Path.cwd().resolve()
     runs_dir = _find_runs_root(root)
@@ -129,58 +210,76 @@ def _load_method_payload(method_key: str) -> Tuple[List[str], Dict[str, float], 
     if not method_dir.is_dir():
         raise FileNotFoundError(f"Missing method directory: {method_dir}")
 
-    results_dir = _newest_results_dir(method_dir)
-
-    all_results_path = results_dir / "all_results.json"
-    results_csv_path = results_dir / "results.csv"
-
-    if not all_results_path.is_file():
-        raise FileNotFoundError(f"Missing {all_results_path}")
-    if not results_csv_path.is_file():
-        raise FileNotFoundError(f"Missing {results_csv_path}")
-
-    # Crystal systems from saved best-match structures
-    with open(all_results_path, "r") as f:
-        payload = json.load(f)
-
-    crystal_systems: List[str] = []
-    for rec in payload:
-        atoms_dict = rec.get("best_match", {}).get("atoms_dict")
-        if not atoms_dict:
-            continue
-        cs = _get_crystal_system_from_atoms_dict(atoms_dict, symprec=0.1)
-        if cs in CRYSYS_ORDER:
-            crystal_systems.append(cs)
-
-    # Match rate from saved CSV only (no AGAPI rerun)
+    results_csv_path, all_results_path = _locate_method_files(method_dir)
     df = pd.read_csv(results_csv_path)
-    pm_success = _safe_bool_series(df, "pm_success")
-    dg_success = _safe_bool_series(df, "dg_success")
+
+    filter_mask = _build_filter_mask(df, max_val)
     error_mask = _safe_str_series(df, "error").str.strip() != ""
 
-    total_rows = int(len(df))
-    valid_rows = int((~error_mask).sum())
-    error_rows = int(error_mask.sum())
+    # Match-rate info computed inside the filtered subset
+    pm_success = _safe_bool_series(df, "pm_success")
+    dg_success = _safe_bool_series(df, "dg_success")
 
-    pm_success_valid = pm_success & (~error_mask)
-    dg_success_valid = dg_success & (~error_mask)
-    any_match_valid = (pm_success | dg_success) & (~error_mask)
+    filtered_rows = int(filter_mask.sum())
+    filtered_valid_rows = int((filter_mask & (~error_mask)).sum())
+    filtered_error_rows = int((filter_mask & error_mask).sum())
+
+    pm_success_valid = pm_success & filter_mask & (~error_mask)
+    dg_success_valid = dg_success & filter_mask & (~error_mask)
+    any_match_valid = (pm_success | dg_success) & filter_mask & (~error_mask)
 
     match_rate_info = {
-        "total_rows": total_rows,
-        "valid_rows": valid_rows,
-        "error_rows": error_rows,
+        "filtered_rows": filtered_rows,
+        "filtered_valid_rows": filtered_valid_rows,
+        "filtered_error_rows": filtered_error_rows,
         "pm_success_n": int(pm_success_valid.sum()),
-        "pm_match_rate_percent": _pct(int(pm_success_valid.sum()), valid_rows),
+        "pm_match_rate_percent": _pct(int(pm_success_valid.sum()), filtered_valid_rows),
         "dg_success_n": int(dg_success_valid.sum()),
-        "dg_match_rate_percent": _pct(int(dg_success_valid.sum()), valid_rows),
+        "dg_match_rate_percent": _pct(int(dg_success_valid.sum()), filtered_valid_rows),
         "any_match_n": int(any_match_valid.sum()),
-        "any_match_rate_percent": _pct(int(any_match_valid.sum()), valid_rows),
+        "any_match_rate_percent": _pct(int(any_match_valid.sum()), filtered_valid_rows),
         "matched_for_pie": int(pm_success_valid.sum()),
-        "unmatched_for_pie": int(valid_rows - int(pm_success_valid.sum())),
+        "unmatched_for_pie": int(filtered_valid_rows - int(pm_success_valid.sum())),
     }
 
-    return crystal_systems, match_rate_info, runs_dir, results_dir
+    # Crystal systems
+    crystal_systems: List[str] = []
+
+    # Preferred route: use all_results.json if present and row-aligned with results.csv
+    if all_results_path is not None:
+        try:
+            with open(all_results_path, "r") as f:
+                payload = json.load(f)
+
+            if len(payload) == len(df):
+                for i, rec in enumerate(payload):
+                    if not bool(filter_mask.iloc[i]):
+                        continue
+                    atoms_dict = rec.get("best_match", {}).get("atoms_dict")
+                    if not atoms_dict:
+                        continue
+                    cs = _get_crystal_system_from_atoms_dict(atoms_dict, symprec=symprec)
+                    if cs in CRYSYS_ORDER:
+                        crystal_systems.append(cs)
+            else:
+                # Robust fallback if JSON and CSV lengths diverge
+                if "rruff_crystal_system" in df.columns:
+                    cs_series = df.loc[filter_mask, "rruff_crystal_system"].map(_normalize_crysys)
+                    crystal_systems = [cs for cs in cs_series.dropna().tolist() if cs in CRYSYS_ORDER]
+        except Exception:
+            if "rruff_crystal_system" in df.columns:
+                cs_series = df.loc[filter_mask, "rruff_crystal_system"].map(_normalize_crysys)
+                crystal_systems = [cs for cs in cs_series.dropna().tolist() if cs in CRYSYS_ORDER]
+    else:
+        if "rruff_crystal_system" not in df.columns:
+            raise KeyError(
+                f"Could not determine crystal systems for {method_key}: "
+                "no all_results.json and no rruff_crystal_system column in CSV."
+            )
+        cs_series = df.loc[filter_mask, "rruff_crystal_system"].map(_normalize_crysys)
+        crystal_systems = [cs for cs in cs_series.dropna().tolist() if cs in CRYSYS_ORDER]
+
+    return crystal_systems, match_rate_info, runs_dir
 
 
 # ── plotting ───────────────────────────────────────────────────────
@@ -190,6 +289,7 @@ def plot_single_crysys(
     method_name: str,
     color: str,
     out_dir: Path,
+    max_val: float,
 ) -> None:
     percents = _crysys_percent_hist(cs_list)
     x = np.arange(len(CRYSYS_ORDER))
@@ -209,66 +309,56 @@ def plot_single_crysys(
     ax.set_xticks(x)
     ax.set_xticklabels(CRYSYS_LABELS, rotation=25)
     ax.set_xlabel("Crystal system", fontsize=30)
-    ax.set_ylabel("% of Total Structures", fontsize=30)
-    ax.set_title(f"Crystal Systems\n{method_name}", fontsize=38)
+    ax.set_ylabel("% of filtered structures", fontsize=30)
+    ax.set_title(f"Crystal Systems\n{method_name}  (a,b,c < {max_val:g} Å)", fontsize=36)
     plt.xticks(fontsize=23)
     plt.yticks(fontsize=23)
 
     _style_axes_like_grid(ax)
 
-    out_png = out_dir / f"{method_key}_crystal_system_histogram.png"
+    out_png = out_dir / f"{method_key}_crystal_system_histogram_max_{str(max_val).replace('.', 'p')}.png"
     plt.savefig(out_png, format="png", dpi=220, bbox_inches="tight")
     plt.close(fig)
 
     print(f"✓ wrote {out_png}")
 
 
-def plot_stacked_crysys(loaded_data, out_dir: Path) -> None:
-    global_max = 0.0
-    for _, _, _, cs_list, _ in loaded_data:
-        percents = _crysys_percent_hist(cs_list)
-        global_max = max(global_max, float(np.max(percents)) if len(percents) else 0.0)
-
-    ymax = 1.12 * global_max if global_max > 0 else 1.0
+def plot_overlaid_crysys(loaded_data, out_dir: Path, max_val: float) -> None:
     x = np.arange(len(CRYSYS_ORDER))
 
-    fig, axes = plt.subplots(3, 1, figsize=(12.5, 22), sharex=True, constrained_layout=True)
+    fig, ax = plt.subplots(figsize=(13, 9), constrained_layout=True)
 
-    for ax, (method_key, method_name, color, cs_list, _) in zip(axes, loaded_data):
+    for method_key, method_name, color, cs_list, _ in loaded_data:
         percents = _crysys_percent_hist(cs_list)
-
-        ax.bar(
+        ax.plot(
             x,
             percents,
-            width=0.68,
-            alpha=0.82,
-            linewidth=0.0,
-            edgecolor="none",
+            marker="o",
+            linewidth=2.8,
+            markersize=8,
             color=color,
+            label=f"{method_name} (n={len(cs_list)})",
         )
 
-        ax.set_ylim(0, ymax)
-        ax.set_ylabel("% of Total Structures", fontsize=24)
-        ax.set_title(f"{method_name}  (n={len(cs_list)})", fontsize=28)
-        plt.sca(ax)
-        plt.yticks(fontsize=18)
-        _style_axes_like_grid(ax)
+    ax.set_xticks(x)
+    ax.set_xticklabels(CRYSYS_LABELS, rotation=25)
+    ax.set_xlabel("Crystal system", fontsize=24)
+    ax.set_ylabel("% of filtered structures", fontsize=24)
+    ax.set_title(f"Crystal Systems by Refinement Method  (RRUFF a,b,c < {max_val:g} Å)", fontsize=30)
+    ax.legend(fontsize=15, frameon=False)
+    plt.xticks(fontsize=18)
+    plt.yticks(fontsize=18)
 
-    axes[-1].set_xticks(x)
-    axes[-1].set_xticklabels(CRYSYS_LABELS, rotation=25)
-    axes[-1].set_xlabel("Crystal system", fontsize=26)
-    plt.xticks(fontsize=20)
+    _style_axes_like_grid(ax)
 
-    fig.suptitle("Crystal Systems by Refinement Method", fontsize=34)
-
-    out_png = out_dir / "crystal_system_histograms_stacked.png"
+    out_png = out_dir / f"crystal_systems_overlaid_max_{str(max_val).replace('.', 'p')}.png"
     plt.savefig(out_png, format="png", dpi=220, bbox_inches="tight")
     plt.close(fig)
 
     print(f"✓ wrote {out_png}")
 
 
-def plot_match_rate_bar(loaded_data, out_dir: Path) -> None:
+def plot_match_rate_bar(loaded_data, out_dir: Path, max_val: float) -> None:
     method_names = []
     rates = []
     colors = []
@@ -278,7 +368,7 @@ def plot_match_rate_bar(loaded_data, out_dir: Path) -> None:
         method_names.append(method_name)
         rates.append(match_info["pm_match_rate_percent"])
         colors.append(color)
-        counts_text.append(f"{match_info['pm_success_n']}/{match_info['valid_rows']}")
+        counts_text.append(f"{match_info['pm_success_n']}/{match_info['filtered_valid_rows']}")
 
     x = np.arange(len(method_names))
 
@@ -297,7 +387,7 @@ def plot_match_rate_bar(loaded_data, out_dir: Path) -> None:
     ax.set_xticks(x)
     ax.set_xticklabels(method_names, rotation=20, ha="right")
     ax.set_ylabel("Pattern-matching match rate (%)", fontsize=24)
-    ax.set_title("Pattern-Matching Match Rate by Refinement Method", fontsize=30)
+    ax.set_title(f"Pattern-Matching Match Rate  (RRUFF a,b,c < {max_val:g} Å)", fontsize=28)
     ax.set_ylim(0, max(100, 1.12 * max(rates) if len(rates) else 100))
     plt.xticks(fontsize=18)
     plt.yticks(fontsize=18)
@@ -314,65 +404,51 @@ def plot_match_rate_bar(loaded_data, out_dir: Path) -> None:
             fontsize=14,
         )
 
-    out_png = out_dir / "pattern_matching_match_rate.png"
+    out_png = out_dir / f"pattern_matching_match_rate_max_{str(max_val).replace('.', 'p')}.png"
     plt.savefig(out_png, format="png", dpi=220, bbox_inches="tight")
     plt.close(fig)
 
     print(f"✓ wrote {out_png}")
 
 
-def plot_crysys_plus_match_pie(loaded_data, out_dir: Path) -> None:
-    """
-    4-panel vertical figure:
-      top 3 = crystal-system histograms
-      bottom = aggregate PM matched vs unmatched pie chart
-    """
-    global_max = 0.0
+def plot_crysys_overlay_plus_match_pie(loaded_data, out_dir: Path, max_val: float) -> None:
     total_matched = 0
     total_unmatched = 0
 
-    for _, _, _, cs_list, match_info in loaded_data:
-        percents = _crysys_percent_hist(cs_list)
-        global_max = max(global_max, float(np.max(percents)) if len(percents) else 0.0)
+    for _, _, _, _, match_info in loaded_data:
         total_matched += int(match_info["matched_for_pie"])
         total_unmatched += int(match_info["unmatched_for_pie"])
 
-    ymax = 1.12 * global_max if global_max > 0 else 1.0
     x = np.arange(len(CRYSYS_ORDER))
 
-    fig = plt.figure(figsize=(13, 28), constrained_layout=True)
-    gs = fig.add_gridspec(4, 1)
+    fig = plt.figure(figsize=(13, 16), constrained_layout=True)
+    gs = fig.add_gridspec(2, 1, height_ratios=[2.2, 1.1])
 
-    axes = [fig.add_subplot(gs[i, 0]) for i in range(3)]
-    ax_pie = fig.add_subplot(gs[3, 0])
+    ax_top = fig.add_subplot(gs[0, 0])
+    ax_pie = fig.add_subplot(gs[1, 0])
 
-    for ax, (method_key, method_name, color, cs_list, match_info) in zip(axes, loaded_data):
+    for method_key, method_name, color, cs_list, _ in loaded_data:
         percents = _crysys_percent_hist(cs_list)
-
-        ax.bar(
+        ax_top.plot(
             x,
             percents,
-            width=0.68,
-            alpha=0.82,
-            linewidth=0.0,
-            edgecolor="none",
+            marker="o",
+            linewidth=2.8,
+            markersize=8,
             color=color,
+            label=f"{method_name} (n={len(cs_list)})",
         )
 
-        ax.set_ylim(0, ymax)
-        ax.set_ylabel("% of Total Structures", fontsize=22)
-        ax.set_title(
-            f"{method_name}  (n={len(cs_list)}, PM={match_info['pm_match_rate_percent']:.1f}%)",
-            fontsize=26,
-        )
-        plt.sca(ax)
-        plt.yticks(fontsize=17)
-        _style_axes_like_grid(ax)
-
-    axes[-1].set_xticks(x)
-    axes[-1].set_xticklabels(CRYSYS_LABELS, rotation=25)
-    axes[-1].set_xlabel("Crystal system", fontsize=24)
-    plt.xticks(fontsize=19)
+    ax_top.set_xticks(x)
+    ax_top.set_xticklabels(CRYSYS_LABELS, rotation=25)
+    ax_top.set_xlabel("Crystal system", fontsize=22)
+    ax_top.set_ylabel("% of filtered structures", fontsize=22)
+    ax_top.set_title(f"Crystal Systems by Refinement Method  (RRUFF a,b,c < {max_val:g} Å)", fontsize=28)
+    ax_top.legend(fontsize=14, frameon=False)
+    plt.sca(ax_top)
+    plt.xticks(fontsize=16)
+    plt.yticks(fontsize=16)
+    _style_axes_like_grid(ax_top)
 
     pie_vals = [total_matched, total_unmatched]
     pie_labels = [
@@ -388,16 +464,11 @@ def plot_crysys_plus_match_pie(loaded_data, out_dir: Path) -> None:
         autopct="%1.1f%%",
         startangle=90,
         counterclock=False,
-        textprops={"fontsize": 18},
+        textprops={"fontsize": 16},
     )
-    ax_pie.set_title(
-        "Aggregate Pattern-Matching Match Rate\n(across all three refinement runs)",
-        fontsize=28,
-    )
+    ax_pie.set_title("Aggregate Pattern-Matching Match Rate", fontsize=24)
 
-    fig.suptitle("Crystal Systems and Pattern-Matching Match Rate", fontsize=34)
-
-    out_png = out_dir / "crystal_system_histograms_plus_match_rate_pie.png"
+    out_png = out_dir / f"crystal_systems_overlaid_plus_match_rate_pie_max_{str(max_val).replace('.', 'p')}.png"
     plt.savefig(out_png, format="png", dpi=220, bbox_inches="tight")
     plt.close(fig)
 
@@ -406,34 +477,44 @@ def plot_crysys_plus_match_pie(loaded_data, out_dir: Path) -> None:
 
 # ── main ───────────────────────────────────────────────────────────
 def main() -> None:
+    args = parse_args()
+
     loaded_data = []
     runs_dir = None
 
     for method_key, method_name, color in METHODS:
-        cs_list, match_info, runs_dir, results_dir = _load_method_payload(method_key)
+        cs_list, match_info, runs_dir = _load_method_payload(
+            method_key=method_key,
+            max_val=args.max_val,
+            symprec=args.symprec,
+        )
         loaded_data.append((method_key, method_name, color, cs_list, match_info))
 
-    out_dir = runs_dir / "refinement_summary_figures"
+    if runs_dir is None:
+        raise RuntimeError("Could not determine runs directory.")
+
+    out_dir = Path(args.output_dir) if args.output_dir is not None else runs_dir / "refinement_summary_figures"
     _ensure_dir(out_dir)
 
-    # 3 individual crystal-system histograms
-    for method_key, method_name, color, cs_list, match_info in loaded_data:
+    # individual histograms
+    for method_key, method_name, color, cs_list, _ in loaded_data:
         plot_single_crysys(
             cs_list=cs_list,
             method_key=method_key,
             method_name=method_name,
             color=color,
             out_dir=out_dir,
+            max_val=args.max_val,
         )
 
-    # 1 PNG with the 3 crystal-system histograms stacked
-    plot_stacked_crysys(loaded_data, out_dir=out_dir)
+    # overlaid crystal-system plot
+    plot_overlaid_crysys(loaded_data, out_dir=out_dir, max_val=args.max_val)
 
-    # 1 PNG with the 3 histograms + 1 aggregate PM match-rate pie chart
-    plot_crysys_plus_match_pie(loaded_data, out_dir=out_dir)
+    # combined overlaid plot + aggregate PM pie
+    plot_crysys_overlay_plus_match_pie(loaded_data, out_dir=out_dir, max_val=args.max_val)
 
-    # 1 PNG with just the PM match rate
-    plot_match_rate_bar(loaded_data, out_dir=out_dir)
+    # PM match-rate bar plot
+    plot_match_rate_bar(loaded_data, out_dir=out_dir, max_val=args.max_val)
 
     print(f"\n✓ all figures written to: {out_dir}")
 
