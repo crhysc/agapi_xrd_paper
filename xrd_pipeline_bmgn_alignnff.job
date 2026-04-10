@@ -44,7 +44,6 @@ if [[ ! -f key.txt ]]; then
     exit 1
 fi
 API_KEY="$(tr -d '\r\n' < key.txt)"
-mkdir -p runs/bmgn_alignnff
-cd runs/bmgn_alignnff
-srun --unbuffered mkdir -p runs/bmgn && cd runs/bmgn && python ../../rruff_xrd_analysis.py --api-key "$API_KEY" --run-refinement --refinement-engine bmgn --output-csv bmgn_results.csv --output-poscars bmgn_poscars.json --run-alignn --max-abc 10
+
+srun --unbuffered mkdir -p runs/bmgn_alignnff && cd runs/bmgn_alignnff && python ../../rruff_xrd_analysis.py --api-key "$API_KEY" --run-refinement --refinement-engine bmgn --output-csv bmgn_results.csv --output-poscars bmgn_poscars.json --run-alignn --max-abc 10
 echo "===== JOB FINISHED ============="
