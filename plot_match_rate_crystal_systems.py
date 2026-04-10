@@ -163,17 +163,53 @@ def plot_side_by_side(loaded, out_dir, max_val):
     unmatched = info["unmatched_for_pie"]
     n = info["filtered_valid_rows"]
 
+    # Use one reference crystal-system distribution, since the current script
+    # is reading filtered RRUFF crystal systems rather than method-dependent ones.
+    cs_ref = loaded[0][3]
+    heights = _crysys_hist(cs_ref)
+
     x = np.arange(len(CRYSYS_ORDER))
-    width = 0.24
-    offsets = [-width, 0.0, width]
 
     fig, (ax1, ax2) = plt.subplots(
         1,
         2,
-        figsize=(14.2, 5.4),
-        gridspec_kw={"width_ratios": [1.9, 1.0]},
+        figsize=(13.6, 5.3),
+        gridspec_kw={"width_ratios": [1.85, 1.0]},
         constrained_layout=True,
     )
+
+    ax1.bar(
+        x,
+        heights,
+        width=0.62,
+        color=WVU_BLUE,
+        alpha=0.9,
+        edgecolor="none",
+    )
+
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(CRYSYS_LABELS, rotation=25, fontsize=12)
+    ax1.set_ylabel("% of filtered structures", fontsize=14)
+    ax1.set_xlabel("Crystal system", fontsize=14)
+    ax1.set_title(f"Crystal Systems (a,b,c ≤ {max_val:g} Å)", fontsize=16)
+    ax1.tick_params(axis="y", labelsize=12)
+    _style_axes_like_grid(ax1)
+
+    ax2.pie(
+        [matched, unmatched],
+        labels=[f"Matched\n{matched}", f"Unmatched\n{unmatched}"],
+        colors=[MATCH_GREEN, UNMATCHED_GRAY],
+        autopct="%1.1f%%",
+        startangle=90,
+        textprops={"fontsize": 12},
+    )
+    ax2.set_title(f"Pattern Matching (n={n})", fontsize=16)
+
+    out = out_dir / f"combined_plot_max_{str(max_val).replace('.', 'p')}.png"
+    plt.savefig(out, dpi=220, bbox_inches="tight")
+    plt.close()
+
+    print(f"✓ wrote {out}")
 
     for (offset, (k, name, color, cs, _)) in zip(offsets, loaded):
         heights = _crysys_hist(cs)
