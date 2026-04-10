@@ -47,7 +47,7 @@ UNITS = {
 }
 
 # Explicit plot colors so reruns remain visually stable
-EXP_COLOR = "#4C78A8"      # elegant blue
+EXP_COLOR = "#2F5D8A"      # elegant blue
 PRED_COLOR = "#E76FAD"     # elegant pink
 
 
