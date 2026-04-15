@@ -1,4 +1,4 @@
 key.txt
 runs
-*slurm*
+slurm-*
 rruff_stoich_output
